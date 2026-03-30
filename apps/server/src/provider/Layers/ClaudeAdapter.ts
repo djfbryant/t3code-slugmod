@@ -63,7 +63,6 @@ import {
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
-import { ServerSettingsService } from "../../serverSettings.ts";
 import { getClaudeModelCapabilities } from "./ClaudeProvider.ts";
 import {
   ProviderAdapterProcessError,
@@ -192,9 +191,32 @@ function isSyntheticClaudeThreadId(value: string): boolean {
 
 function toMessage(cause: unknown, fallback: string): string {
   if (cause instanceof Error && cause.message.length > 0) {
-    return cause.message;
+    return normalizeClaudeErrorMessage(cause.message);
   }
   return fallback;
+}
+
+function normalizeClaudeErrorMessage(message: string): string {
+  const trimmed = message.trim();
+  const lower = trimmed.toLowerCase();
+
+  if (
+    lower.includes("rate limit reached") ||
+    lower.includes("rate limit exceeded") ||
+    lower.includes("too many requests") ||
+    lower.includes("status code 429") ||
+    lower.includes("http 429") ||
+    lower.includes("api error: rate limit")
+  ) {
+    return [
+      "Claude SDK reported a rate limit from Anthropic.",
+      "Your plan usage meter can still look low if this session is authenticated to a different workspace/account,",
+      "or if the SDK hit a separate request bucket.",
+      "Retry later or run `claude auth status` to confirm the active Claude account.",
+    ].join(" ");
+  }
+
+  return trimmed;
 }
 
 function toError(cause: unknown, fallback: string): Error {
@@ -203,7 +225,7 @@ function toError(cause: unknown, fallback: string): Error {
 
 function normalizeClaudeStreamMessages(cause: Cause.Cause<Error>): ReadonlyArray<string> {
   const errors = Cause.prettyErrors(cause)
-    .map((error) => error.message.trim())
+    .map((error) => normalizeClaudeErrorMessage(error.message))
     .filter((message) => message.length > 0);
   if (errors.length > 0) {
     return errors;
@@ -266,6 +288,19 @@ function isInterruptedResult(result: SDKResultMessage): boolean {
       errors.includes("interrupted by user") ||
       errors.includes("aborted"))
   );
+}
+
+function errorMessageFromClaudeResult(result: SDKResultMessage): string | undefined {
+  if (result.subtype === "success" || !Array.isArray(result.errors)) {
+    return undefined;
+  }
+
+  const firstError = result.errors.find((error): error is string => typeof error === "string");
+  if (!firstError) {
+    return undefined;
+  }
+
+  return normalizeClaudeErrorMessage(firstError);
 }
 
 function asRuntimeItemId(value: string): RuntimeItemId {
@@ -931,7 +966,6 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   const sessions = new Map<ThreadId, ClaudeSessionContext>();
   const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
-  const serverSettingsService = yield* ServerSettingsService;
 
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
   const nextEventId = Effect.map(Random.nextUUIDv4, (id) => EventId.makeUnsafe(id));
@@ -1907,7 +1941,7 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     const status = turnStatusFromResult(message);
-    const errorMessage = message.subtype === "success" ? undefined : message.errors[0];
+    const errorMessage = errorMessageFromClaudeResult(message);
 
     if (status === "failed") {
       yield* emitRuntimeError(context, errorMessage ?? "Claude turn failed.");
@@ -2297,7 +2331,9 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       yield* completeTurn(context, "interrupted", "Session stopped.");
     }
 
-    yield* Queue.shutdown(context.promptQueue);
+    yield* Queue.offer(context.promptQueue, {
+      type: "terminate",
+    });
 
     const streamFiber = context.streamFiber;
     context.streamFiber = undefined;
@@ -2386,7 +2422,11 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
       const promptQueue = yield* Queue.unbounded<PromptQueueItem>();
       const prompt = Stream.fromQueue(promptQueue).pipe(
-        Stream.filter((item) => item.type === "message"),
+        Stream.takeWhile((item) => item.type !== "terminate"),
+        Stream.filter(
+          (item): item is Extract<PromptQueueItem, { readonly type: "message" }> =>
+            item.type === "message",
+        ),
         Stream.map((item) => item.message),
         Stream.catchCause((cause) =>
           Cause.hasInterruptsOnly(cause) ? Stream.empty : Stream.failCause(cause),
@@ -2668,19 +2708,6 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const canUseTool: CanUseTool = (toolName, toolInput, callbackOptions) =>
         runPromise(canUseToolEffect(toolName, toolInput, callbackOptions));
 
-      const claudeSettings = yield* serverSettingsService.getSettings.pipe(
-        Effect.map((settings) => settings.providers.claudeAgent),
-        Effect.mapError(
-          (error) =>
-            new ProviderAdapterProcessError({
-              provider: PROVIDER,
-              threadId: input.threadId,
-              detail: error.message,
-              cause: error,
-            }),
-        ),
-      );
-      const claudeBinaryPath = claudeSettings.binaryPath;
       const modelSelection =
         input.modelSelection?.provider === "claudeAgent" ? input.modelSelection : undefined;
       const caps = getClaudeModelCapabilities(modelSelection?.model);
@@ -2702,7 +2729,6 @@ const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const queryOptions: ClaudeQueryOptions = {
         ...(input.cwd ? { cwd: input.cwd } : {}),
         ...(apiModelId ? { model: apiModelId } : {}),
-        pathToClaudeCodeExecutable: claudeBinaryPath,
         settingSources: [...CLAUDE_SETTING_SOURCES],
         ...(effectiveEffort ? { effort: effectiveEffort } : {}),
         ...(permissionMode ? { permissionMode } : {}),
