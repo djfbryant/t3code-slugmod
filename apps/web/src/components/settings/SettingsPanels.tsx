@@ -36,6 +36,7 @@ import { isElectron } from "../../env";
 import { useTheme } from "../../hooks/useTheme";
 import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
 import { useThreadActions } from "../../hooks/useThreadActions";
+import { DEFAULT_ACCENT_COLOR, DEFAULT_THEME_PREFERENCE, type AccentColor } from "../../lib/themePreference";
 import {
   setDesktopUpdateStateQueryData,
   useDesktopUpdateState,
@@ -60,20 +61,52 @@ import { toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { ProjectFavicon } from "../ProjectFavicon";
 
-const THEME_OPTIONS = [
+const THEME_FAMILY_OPTIONS = [
+  {
+    value: "default",
+    label: "Default",
+    description: "Keep the current app palette.",
+  },
+  {
+    value: "gruvbox",
+    label: "Gruvbox",
+    description: "A Zed-style retro palette with warm contrast.",
+  },
+] as const;
+
+const THEME_MODE_OPTIONS = [
   {
     value: "system",
     label: "System",
+    description: "Follow the operating system.",
   },
   {
     value: "light",
     label: "Light",
+    description: "Always use the light appearance.",
   },
   {
     value: "dark",
     label: "Dark",
+    description: "Always use the dark appearance.",
   },
 ] as const;
+
+const ACCENT_COLOR_OPTIONS: readonly {
+  value: AccentColor;
+  label: string;
+  lightColor: string;
+  darkColor: string;
+}[] = [
+  { value: "blue", label: "Blue", lightColor: "oklch(0.488 0.217 264)", darkColor: "oklch(0.588 0.217 264)" },
+  { value: "violet", label: "Violet", lightColor: "oklch(0.488 0.217 285)", darkColor: "oklch(0.588 0.217 285)" },
+  { value: "purple", label: "Purple", lightColor: "oklch(0.488 0.217 305)", darkColor: "oklch(0.588 0.217 305)" },
+  { value: "pink", label: "Pink", lightColor: "oklch(0.488 0.217 335)", darkColor: "oklch(0.588 0.217 335)" },
+  { value: "red", label: "Red", lightColor: "oklch(0.488 0.217 20)", darkColor: "oklch(0.588 0.217 20)" },
+  { value: "orange", label: "Orange", lightColor: "oklch(0.488 0.217 55)", darkColor: "oklch(0.588 0.217 55)" },
+  { value: "green", label: "Green", lightColor: "oklch(0.488 0.2 145)", darkColor: "oklch(0.588 0.2 145)" },
+  { value: "teal", label: "Teal", lightColor: "oklch(0.488 0.15 195)", darkColor: "oklch(0.588 0.15 195)" },
+];
 
 const TIMESTAMP_FORMAT_LABELS = {
   locale: "System default",
@@ -439,7 +472,7 @@ function AboutVersionSection() {
 }
 
 export function useSettingsRestore(onRestored?: () => void) {
-  const { theme, setTheme } = useTheme();
+  const { resetTheme, themeFamily, themeMode, accentColor: restoreAccentColor } = useTheme();
   const settings = useSettings();
   const { resetSettings } = useUpdateSettings();
 
@@ -452,10 +485,14 @@ export function useSettingsRestore(onRestored?: () => void) {
     const defaultSettings = DEFAULT_UNIFIED_SETTINGS.providers[providerSettings.provider];
     return !Equal.equals(currentSettings, defaultSettings);
   });
+  const isThemeDirty =
+    themeFamily !== DEFAULT_THEME_PREFERENCE.family ||
+    themeMode !== DEFAULT_THEME_PREFERENCE.mode ||
+    restoreAccentColor !== DEFAULT_ACCENT_COLOR;
 
   const changedSettingLabels = useMemo(
     () => [
-      ...(theme !== "system" ? ["Theme"] : []),
+      ...(isThemeDirty ? ["Theme"] : []),
       ...(settings.timestampFormat !== DEFAULT_UNIFIED_SETTINGS.timestampFormat
         ? ["Time format"]
         : []),
@@ -486,7 +523,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.diffWordWrap,
       settings.enableAssistantStreaming,
       settings.timestampFormat,
-      theme,
+      isThemeDirty,
     ],
   );
 
@@ -499,11 +536,10 @@ export function useSettingsRestore(onRestored?: () => void) {
       ),
     );
     if (!confirmed) return;
-
-    setTheme("system");
+    resetTheme();
     resetSettings();
     onRestored?.();
-  }, [changedSettingLabels, onRestored, resetSettings, setTheme]);
+  }, [changedSettingLabels, onRestored, resetSettings, resetTheme]);
 
   return {
     changedSettingLabels,
@@ -512,7 +548,7 @@ export function useSettingsRestore(onRestored?: () => void) {
 }
 
 export function GeneralSettingsPanel() {
-  const { theme, setTheme } = useTheme();
+  const { resetTheme, setThemeFamily, setThemeMode, themeFamily, themeMode, accentColor, setAccentColor, resolvedTheme } = useTheme();
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
   const serverConfigQuery = useQuery(serverConfigQueryOptions());
@@ -578,6 +614,10 @@ export function GeneralSettingsPanel() {
     settings.textGenerationModelSelection ?? null,
     DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection ?? null,
   );
+  const isThemeDirty =
+    themeFamily !== DEFAULT_THEME_PREFERENCE.family ||
+    themeMode !== DEFAULT_THEME_PREFERENCE.mode ||
+    accentColor !== DEFAULT_ACCENT_COLOR;
 
   const openKeybindingsFile = useCallback(() => {
     if (!keybindingsConfigPath) return;
@@ -740,34 +780,95 @@ export function GeneralSettingsPanel() {
       <SettingsSection title="General">
         <SettingsRow
           title="Theme"
-          description="Choose how T3 Code looks across the app."
+          description="Choose the palette family and whether it follows your system preference."
           resetAction={
-            theme !== "system" ? (
-              <SettingResetButton label="theme" onClick={() => setTheme("system")} />
-            ) : null
+            isThemeDirty ? <SettingResetButton label="theme" onClick={resetTheme} /> : null
           }
           control={
-            <Select
-              value={theme}
-              onValueChange={(value) => {
-                if (value === "system" || value === "light" || value === "dark") {
-                  setTheme(value);
-                }
-              }}
-            >
-              <SelectTrigger className="w-full sm:w-40" aria-label="Theme preference">
-                <SelectValue>
-                  {THEME_OPTIONS.find((option) => option.value === theme)?.label ?? "System"}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup align="end" alignItemWithTrigger={false}>
-                {THEME_OPTIONS.map((option) => (
-                  <SelectItem hideIndicator key={option.value} value={option.value}>
-                    {option.label}
-                  </SelectItem>
-                ))}
-              </SelectPopup>
-            </Select>
+            <div className="flex w-full flex-col gap-2 sm:w-56">
+              <Select
+                value={themeFamily}
+                onValueChange={(value) => {
+                  if (value === "default" || value === "gruvbox") {
+                    setThemeFamily(value);
+                  }
+                }}
+              >
+                <SelectTrigger className="w-full" aria-label="Theme family">
+                  <SelectValue>
+                    {THEME_FAMILY_OPTIONS.find((option) => option.value === themeFamily)?.label ??
+                      "Default"}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectPopup align="end" alignItemWithTrigger={false}>
+                  {THEME_FAMILY_OPTIONS.map((option) => (
+                    <SelectItem hideIndicator key={option.value} value={option.value}>
+                      <div className="flex flex-col items-start gap-0.5 text-left">
+                        <span>{option.label}</span>
+                        <span className="text-[11px] text-muted-foreground">
+                          {option.description}
+                        </span>
+                      </div>
+                    </SelectItem>
+                  ))}
+                </SelectPopup>
+              </Select>
+
+              <Select
+                value={themeMode}
+                onValueChange={(value) => {
+                  if (value === "system" || value === "light" || value === "dark") {
+                    setThemeMode(value);
+                  }
+                }}
+              >
+                <SelectTrigger className="w-full" aria-label="Theme appearance">
+                  <SelectValue>
+                    {THEME_MODE_OPTIONS.find((option) => option.value === themeMode)?.label ??
+                      "System"}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectPopup align="end" alignItemWithTrigger={false}>
+                  {THEME_MODE_OPTIONS.map((option) => (
+                    <SelectItem hideIndicator key={option.value} value={option.value}>
+                      <div className="flex flex-col items-start gap-0.5 text-left">
+                        <span>{option.label}</span>
+                        <span className="text-[11px] text-muted-foreground">
+                          {option.description}
+                        </span>
+                      </div>
+                    </SelectItem>
+                  ))}
+                </SelectPopup>
+              </Select>
+
+              <div className="flex flex-wrap gap-2 pt-1" role="group" aria-label="Accent colour">
+                {ACCENT_COLOR_OPTIONS.map((option) => {
+                  const color = resolvedTheme === "dark" ? option.darkColor : option.lightColor;
+                  const isSelected = accentColor === option.value;
+                  return (
+                    <Tooltip key={option.value}>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          aria-label={option.label}
+                          aria-pressed={isSelected}
+                          onClick={() => setAccentColor(option.value)}
+                          className={cn(
+                            "size-6 rounded-full transition-[box-shadow,outline] outline-2 outline-offset-2 outline-transparent",
+                            isSelected
+                              ? "outline-foreground/60"
+                              : "hover:outline-foreground/30",
+                          )}
+                          style={{ backgroundColor: color }}
+                        />
+                      </TooltipTrigger>
+                      <TooltipPopup>{option.label}</TooltipPopup>
+                    </Tooltip>
+                  );
+                })}
+              </div>
+            </div>
           }
         />
 
